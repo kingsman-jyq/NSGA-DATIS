@@ -66,8 +66,7 @@ def calculate_rate(budget_ratio_list,test_support_output,x_test,rank_lst,ans,clu
         print(f"The Fault Detection Rate of Top: {n} cases :{faults_rate}")
         result_fault_rate.append(faults_rate)
 
-    return 
-
+    return result_fault_rate
 
 
 def load_data():  

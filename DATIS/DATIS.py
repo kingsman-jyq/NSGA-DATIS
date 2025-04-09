@@ -5,7 +5,7 @@ from sklearn.preprocessing import Normalizer
 
 
 def DATIS_test_input_selection(softmax_prob,train_support_output,y_train,test_support_output,y_test,num_classes,k=100,T=0.1):
-    
+
 
     normalizer = Normalizer(norm='l2')
     train_support_output = normalizer.transform(train_support_output)
