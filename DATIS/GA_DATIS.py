@@ -38,10 +38,10 @@ class GADATIS:
         # 1. 计算平均不确定性
         uncertainty = np.mean(self.uncertainty_scores[individual])
 
-        # 2. 计算多样性（个体内所有测试输入间的平均距离）
+        # 2. 计算多样性
         distances = []
         features = self.test_features[individual]
-        # 使用KNN加速计算（仅需上三角距离）
+
         nbrs = NearestNeighbors(n_neighbors=len(features)-1, metric='euclidean').fit(features)
         distances, _ = nbrs.kneighbors(features)
         diversity = np.mean(distances)
@@ -116,11 +116,11 @@ class GADATIS:
                         child2 = self._crossover(selected[i + 1], selected[i])
                         offspring.extend([self._mutation(child1), self._mutation(child2)])
 
-                # 更新种群（保留精英）
+                # 更新种群
                 population = self._update_population(selected, offspring)
                 pbar.update(1)
 
-        return best_individual  # 返回最优解的测试输入索引
+        return best_individual
 
 
 if __name__ == "__main__":
