@@ -1,23 +1,26 @@
 import numpy as np
 import random
 from tqdm import tqdm
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import Normalizer
+from sklearn.preprocessing import Normalizer, MinMaxScaler
+from sklearn.decomposition import PCA
+from sklearn.neighbors import kneighbors_graph
+from scipy.sparse.csgraph import minimum_spanning_tree
 
 
 class NSGADATIS:
 
     def __init__(self, test_features, uncertainty_scores, budget=500,
                  pop_size=100, generations=100, crossover_rate=0.9,
-                 mutation_rate=0.01):
+                 mutation_rate=0.01, pca_components=100):
         """
             test_features: 测试集的潜在特征 [n_samples, feature_dim]
             uncertainty_scores: 测试输入的不确定性分数 [n_samples]
             budget: 需选择的测试输入数量
-            pop_size: 种群大小（建议是2的倍数）
+            pop_size: 种群大小
             generations: 迭代次数
             crossover_rate: 交叉概率
             mutation_rate: 变异概率
+            pca_components: 用于几何多样性计算的PCA降维维度
         """
         self.test_features = Normalizer(norm='l2').fit_transform(test_features)
         self.uncertainty_scores = uncertainty_scores
@@ -27,34 +30,63 @@ class NSGADATIS:
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
         self.n_samples = test_features.shape[0]
+        self.original_dim = test_features.shape[1]
+
+        # PCA降维处理
+        self.use_pca = (self.original_dim > pca_components)
+        if self.use_pca:
+            print(f"特征维度较高 ({self.original_dim})，使用PCA降维至{pca_components}维")
+            self.pca = PCA(n_components=pca_components)
+            self.pca.fit(self.test_features)
+            self.reduced_features = self.pca.transform(self.test_features)
+            print(f"PCA解释方差比例: {sum(self.pca.explained_variance_ratio_):.4f}")
+        else:
+            self.reduced_features = self.test_features
+
+        # 为几何多样性准备的Min-Max缩放器
+        self.scaler = MinMaxScaler()
+        self.scaled_features = self.scaler.fit_transform(self.reduced_features)
 
     def _initialize_population(self):
         # 确保种群中的每个个体都是唯一索引的集合
         population = []
-        for _ in range(self.pop_size):
+
+        # 添加不确定性最大个体
+        uncertainty_sorted = np.argsort(-self.uncertainty_scores)
+        greedy_by_uncertainty = uncertainty_sorted[:self.budget].tolist()
+        population.append(greedy_by_uncertainty)
+
+        for _ in range(self.pop_size - 1):
             individual = random.sample(range(self.n_samples), self.budget)
             population.append(individual)
         return population
 
+    def _calculate_geometric_diversity(self, individual):
+        features = self.scaled_features[individual]
+
+        # 方法1：计算几何多样性 GD = det(F·F^T)
+        # 获取已缩放的特征矩阵
+
+        # dot_p = np.dot(features, features.T)
+        # _, diversity = np.linalg.slogdet(dot_p)
+
+        # 方法2：计算最小生成树权重和（覆盖整个子集的最短路径）
+        # 构建距离图
+        graph = kneighbors_graph(features, n_neighbors=min(len(features) - 1, 20),
+                                 mode='distance', include_self=False)
+        # 计算最小生成树
+        mst = minimum_spanning_tree(graph)
+        diversity = mst.sum()
+
+        return diversity
+
     def _calculate_objectives(self, individual):
+        """计算两个目标函数值：不确定性和几何多样性"""
         # 1. 计算平均不确定性（最大化）
         uncertainty = np.mean(self.uncertainty_scores[individual])
 
-        # 2. 计算多样性（最大化）
-        features = self.test_features[individual]
-
-        # 处理边缘情况：如果特征数量太少
-        k = min(len(features) - 1, 5) if len(features) > 1 else 1
-        k = max(k, 1)  # 确保k至少为1
-
-        nbrs = NearestNeighbors(n_neighbors=k + 1, metric='euclidean').fit(features)
-        distances, _ = nbrs.kneighbors(features)
-
-        # 使用每个点到其最近的k个邻居的平均距离
-        if k > 0 and distances.shape[1] > 1:
-            diversity = np.mean(distances[:, 1:])  # 排除自身距离(第0列)
-        else:
-            diversity = 0.0  # 如果只有一个样本，设置多样性为0
+        # 2. 计算几何多样性（最大化）
+        diversity = self._calculate_geometric_diversity(individual)
 
         # 返回待最大化的目标值
         return [uncertainty, diversity]
@@ -91,7 +123,7 @@ class NSGADATIS:
 
         # 生成所有前沿
         i = 0
-        while i < len(fronts) and fronts[i]:  # 修复：确保i在有效范围内
+        while i < len(fronts) and fronts[i]:  # 确保i在有效范围内
             next_front = []
             for j in fronts[i]:
                 for k in dominated_solutions[j]:
@@ -270,7 +302,7 @@ class NSGADATIS:
                         for i in range(min(remaining, len(sorted_last_front))):
                             new_population.append(combined[sorted_last_front[i]])
 
-                    # 如果仍然不足，随机添加
+                    # 如果仍然不足，随机添加（这是一个安全措施）
                     while len(new_population) < self.pop_size:
                         random_idx = random.randint(0, len(combined) - 1)
                         new_population.append(combined[random_idx])
@@ -280,6 +312,7 @@ class NSGADATIS:
 
                 except Exception as e:
                     print(f"迭代中发生错误: {str(e)}")
+                    # 在出错时，保持当前种群不变，继续下一次迭代
 
                 pbar.update(1)
 
@@ -329,7 +362,8 @@ if __name__ == "__main__":
         uncertainty_scores=uncertainty_scores,
         budget=500,  # 选择500个测试输入
         pop_size=100,  # 种群大小
-        generations=100  # 迭代次数
+        generations=100,  # 迭代次数
+        pca_components=50  # PCA降维至50维
     )
 
     # 返回最佳解和帕累托前沿
