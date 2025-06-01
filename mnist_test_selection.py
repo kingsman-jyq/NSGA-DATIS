@@ -6,7 +6,8 @@ from keras import Model
 import copy
 from DATIS.DATIS import DATIS_test_input_selection,DATIS_redundancy_elimination
 from keras.datasets import mnist
-
+from keras.datasets import imdb
+from keras.utils import pad_sequences
 
 def get_faults(sample, mis_ind_test, Clustering_labels):
     i=0
@@ -50,7 +51,7 @@ def calculate_rate(budget_ratio_list,test_support_output,x_test,rank_lst,ans,clu
     mis_test_ind= np.load(cluster_path+'/mis_test_ind.npy')
     
 
-    print('total test case:{len}')
+    print(f"total test case:{len(x_test)}")
    
     for i_, n in enumerate(top_list):
 
@@ -81,10 +82,22 @@ def load_data():
         return (x_train, y_train), (x_test, y_test)
 
 
+
+def load_data_imdb():
+    (x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=20000)
+
+    # 对序列进行填充/截断，使它们具有相同的长度
+    x_train = pad_sequences(x_train, maxlen=500, padding='post', truncating='post')
+    x_test = pad_sequences(x_test, maxlen=500, padding='post', truncating='post')
+
+    # 转换为float32类型（如果需要）
+    x_train = x_train.astype('float32')
+    x_test = x_test.astype('float32')
+
+    return (x_train, y_train), (x_test, y_test)
+
 def load_data_corrupted():
 
-    data_corrupted_file = "./corrupted_data/mnist/data_corrupted.npy"
-    label_corrupted_file = "./corrupted_data/mnist/label_corrupted.npy"
     data_corrupted_file = "./corrupted_data/mnist/data_corrupted.npy"
     label_corrupted_file = "./corrupted_data/mnist/label_corrupted.npy"
     x_test_ood = np.load(data_corrupted_file)

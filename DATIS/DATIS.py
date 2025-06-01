@@ -63,9 +63,9 @@ def DATIS_redundancy_elimination(budget_ratio_list,rank_list,test_support_output
     size = len(test_support_output)
     normalizer = Normalizer(norm='l2')
     test = normalizer.transform(test_support_output)
-    ratio_list =[0.001,0.005,0.01,0.02,0.03,0.05,0.1]
-    pool_list = [4,3,3,2,2,2,2]
-    weight_list = [0.4,0.3,0.3,0.2,0.2,0.2,0.2]
+    ratio_list =[0.001,0.002,0.003,0.005,0.01,0.02,0.03,0.05,0.1]
+    pool_list = [4,4,3,3,3,2,2,2,2]
+    weight_list = [0.4,0.4,0.3,0.3,0.3,0.2,0.2,0.2,0.2]
     top_list =[]
     arg_index_list =[]
     for ratio_ in budget_ratio_list:

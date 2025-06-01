@@ -4,7 +4,7 @@ from keras.models import load_model, Model
 from time import time
 from DATIS.DATIS import DATIS_test_input_selection, DATIS_redundancy_elimination
 from DATIS.GA_DATIS import GADATIS
-from mnist_test_selection import load_data, load_data_corrupted, calculate_rate
+from mnist_test_selection import load_data, load_data_corrupted, calculate_rate, load_data_imdb
 from mnist_dnn_enhancement import retrain
 from DATIS.NSGAII_DATIS import NSGADATIS
 
@@ -25,12 +25,10 @@ def load_model_and_features(model_path, x_train, x_test):
 def run_datis(softmax_prob, train_support, y_train, test_support, y_test, n_classes, budget_ratios):
     start_time = time()
 
-    # 第一阶段：测试输入选择
     rank_lst = DATIS_test_input_selection(
         softmax_prob, train_support, y_train, test_support, y_test, n_classes
     )
 
-    # 第二阶段：冗余消除
     selected_indices = DATIS_redundancy_elimination(
         budget_ratios, rank_lst, test_support, y_test
     )
@@ -46,7 +44,6 @@ def run_gadatis(test_support, uncertainty_scores, budget_ratios, x_test):
 
     selected_indices = []
     for budget in budgets:
-        # 初始化并运行遗传算法
         ga = GADATIS(
             test_features=test_support,
             uncertainty_scores=uncertainty_scores,
@@ -79,25 +76,72 @@ def run_nsga(test_support, uncertainty_scores, budget_ratios, x_test):
     elapsed_time = time() - start_time
     return selected_indices, elapsed_time
 
-def evaluate_methods(data_type, budget_ratios):
+def calculate_apfd(test_case_order, fault_dict, total_tests):
+    if not fault_dict:
+        return 0.0
+
+    m = len(fault_dict)
+    n = total_tests
+
+    first_positions = []
+
+    for fault_id, fault_test_cases in fault_dict.items():
+        for pos, test_idx in enumerate(test_case_order):
+            if test_idx in fault_test_cases:
+                first_positions.append(pos + 1)
+                break
+        else:
+            first_positions.append(n + 1)
+
+    sum_tf = sum(first_positions)
+    apfd = 1 - (sum_tf / (n * m)) + (1 / (2 * n))
+
+    return apfd
+
+def get_fault_info(cluster_path):
+
+    clustering_labels = np.load(cluster_path + '/cluster1.npy')
+    mis_test_ind = np.load(cluster_path + '/mis_test_ind.npy')
+
+    unique_faults = np.unique(clustering_labels)
+    fault_dict = {}
+
+    for fault_id in unique_faults:
+        if fault_id == -1:
+            indices = np.where(clustering_labels == -1)[0]
+            fault_dict[-1] = [mis_test_ind[i] for i in indices]
+        else:
+            indices = np.where(clustering_labels == fault_id)[0]
+            fault_dict[fault_id] = [mis_test_ind[i] for i in indices]
+
+
+    total_faults = len(fault_dict)
+
+    return fault_dict
+
+def evaluate_methods(data_type, budget_ratios, dataset='mnist'):
     # 加载数据
-    if data_type == 'nominal':
-        (x_train, y_train), (x_test, y_test) = load_data()
-        cluster_path = './cluster_data/LeNet5_mnist_nominal'
+    if dataset == 'mnist':
+        if data_type == 'nominal':
+            (x_train, y_train), (x_test, y_test) = load_data()
+            cluster_path = './cluster_data/LeNet5_mnist_nominal'
+        else:
+            (x_train, y_train), _ = load_data()
+            x_test, y_test = load_data_corrupted()
+            cluster_path = './cluster_data/LeNet5_mnist_corrupted'
+
+        model_path = "./model/model_mnist_LeNet5.hdf5"
+        n_classes = 10
     else:
-        (x_train, y_train), _ = load_data()
-        x_test, y_test = load_data_corrupted()
-        cluster_path = './cluster_data/LeNet5_mnist_corrupted'
+        (x_train, y_train), (x_test, y_test) = load_data_imdb()
+        model_path = "./model/model_imdb_BiLstm.hdf5"
+        cluster_path = "./cluster_data/BiLstm_imdb_nominal"
+        n_classes = 2
 
-    model_path = "./model/model_mnist_LeNet5.hdf5"
-    n_classes = 10
-
-    # 提取特征
     _, _, train_support, test_support, softmax_prob = load_model_and_features(
         model_path, x_train, x_test
     )
 
-    # 计算不确定性分数（DATIS第一阶段的输出）
     rank_lst = DATIS_test_input_selection(
         softmax_prob, train_support, y_train, test_support, y_test, n_classes
     )
@@ -108,10 +152,6 @@ def evaluate_methods(data_type, budget_ratios):
         softmax_prob, train_support, y_train, test_support, y_test, n_classes, budget_ratios
     )
 
-    # gadatis_indices, gadatis_time = run_gadatis(
-    #     test_support, uncertainty_scores, budget_ratios, x_test
-    # )
-
     nsga_indices, nsga_time = run_nsga(
         test_support, uncertainty_scores, budget_ratios, x_test
     )
@@ -121,55 +161,50 @@ def evaluate_methods(data_type, budget_ratios):
     print("\nDATIS Results:")
     datis_rates = calculate_rate(budget_ratios, test_support, x_test, rank_lst, datis_indices, cluster_path)
 
-    # print("\nGADATIS Results:")
-    # gadatis_rates = calculate_rate(budget_ratios, test_support, x_test, rank_lst, gadatis_indices, cluster_path)
-
     print("\nNSGADATIS Results:")
     nsga_rates = calculate_rate(budget_ratios, test_support, x_test, rank_lst, nsga_indices, cluster_path)
-    # 评估DNN增强效果
-    mid_index = len(x_test) // 2
-    x_val = x_test[mid_index:]
-    y_val = y_test[mid_index:]
 
-    print("\nDNN Enhancement Evaluation:")
+    datis_apfd_scores = []
+    nsga_apfd_scores = []
+    total_tests = len(x_test)
+
+    print("\nAPFD Results:")
+    print("-------------")
+    print(f"{'Budget Ratio':<15} {'DATIS APFD':<15} {'NSGA-II APFD':<15} {'Improvement':<15}")
+    print("-" * 60)
+
+    fault_dict = get_fault_info(cluster_path)
+
     for i, ratio in enumerate(budget_ratios):
-        print(f"\nBudget ratio: {ratio}")
+        if datis_indices:
+            datis_apfd = calculate_apfd(datis_indices[i], fault_dict, total_tests)
+        else:
+            k = int(total_tests * ratio)
+            datis_apfd = calculate_apfd(rank_lst[:k], fault_dict, total_tests)
 
-        # DATIS增强
-        x_s_datis = x_test[datis_indices[i]]
-        y_s_datis = y_test[datis_indices[i]]
-        print("DATIS enhancement:")
-        retrain(data_type, model_path, x_s_datis, y_s_datis, x_train, y_train, x_val, y_val, n_classes)
+        nsga_apfd = calculate_apfd(nsga_indices[i], fault_dict, total_tests)
 
-        # GADATIS增强
-        # x_s_ga = x_test[gadatis_indices[i]]
-        # y_s_ga = y_test[gadatis_indices[i]]
-        # print("GADATIS enhancement:")
-        # retrain(data_type, model_path, x_s_ga, y_s_ga, x_train, y_train, x_val, y_val, n_classes)
+        datis_apfd_scores.append(datis_apfd)
+        nsga_apfd_scores.append(nsga_apfd)
 
-        # NSGADATIS增强
-        x_s_nsga = x_test[nsga_indices[i]]
-        y_s_nsga = y_test[nsga_indices[i]]
-        print("NSGADATIS enhancement:")
-        retrain(data_type, model_path, x_s_nsga, y_s_nsga, x_train, y_train, x_val, y_val, n_classes)
+        improvement = ((nsga_apfd - datis_apfd) / datis_apfd) * 100 if datis_apfd > 0 else float('inf')
+
+        print(f"{ratio:<15.4f} {datis_apfd:<15.4f} {nsga_apfd:<15.4f} {improvement:+.2f}%")
 
     return {
         'datis': {'time': datis_time, 'rates': datis_rates},
-        # 'gadatis': {'time': gadatis_time, 'rates': gadatis_rates},
         'nsga': {'time': nsga_time, 'rates': nsga_rates}
     }
 
-
 def plot_results(results_nominal, results_corrupted, budget_ratios):
-    """可视化比较结果"""
     plt.figure(figsize=(15, 5))
 
     # 故障检测率比较
     plt.subplot(1, 2, 1)
     plt.plot(budget_ratios, results_nominal['datis']['rates'], 'b-o', label='DATIS (Nominal)')
-    plt.plot(budget_ratios, results_nominal['gadatis']['rates'], 'r--o', label='GADATIS (Nominal)')
+    plt.plot(budget_ratios, results_nominal['nsga']['rates'], 'r--o', label='NSGADATIS (Nominal)')
     plt.plot(budget_ratios, results_corrupted['datis']['rates'], 'b-s', label='DATIS (Corrupted)')
-    plt.plot(budget_ratios, results_corrupted['gadatis']['rates'], 'r--s', label='GADATIS (Corrupted)')
+    plt.plot(budget_ratios, results_corrupted['nsga']['rates'], 'r--s', label='NSGADATIS (Corrupted)')
     plt.xlabel('Budget Ratio')
     plt.ylabel('Fault Detection Rate')
     plt.title('Fault Detection Rate Comparison')
@@ -178,9 +213,9 @@ def plot_results(results_nominal, results_corrupted, budget_ratios):
 
     # 执行时间比较
     plt.subplot(1, 2, 2)
-    methods = ['DATIS', 'GADATIS']
-    nominal_times = [results_nominal['datis']['time'], results_nominal['gadatis']['time']]
-    corrupted_times = [results_corrupted['datis']['time'], results_corrupted['gadatis']['time']]
+    methods = ['DATIS', 'NSGADATIS']
+    nominal_times = [results_nominal['datis']['time'], results_nominal['nsga']['time']]
+    corrupted_times = [results_corrupted['datis']['time'], results_corrupted['nsga']['time']]
 
     x = np.arange(len(methods))
     width = 0.35
@@ -197,14 +232,11 @@ def plot_results(results_nominal, results_corrupted, budget_ratios):
     plt.savefig('comparison_results.png')
     plt.show()
 
-
 if __name__ == '__main__':
     # 实验设置
-    budget_ratios = [0.001, 0.005, 0.01, 0.05, 0.1]
+    budget_ratios = [0.001,0.002,0.003]
 
     results_nominal = evaluate_methods('nominal', budget_ratios)
-    results_corrupted = evaluate_methods('corrupted', budget_ratios)
 
-    # 可视化结果
-    # plot_results(results_nominal, results_corrupted, budget_ratios)
+
 

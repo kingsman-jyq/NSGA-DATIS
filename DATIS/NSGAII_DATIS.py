@@ -64,19 +64,13 @@ class NSGADATIS:
     def _calculate_geometric_diversity(self, individual):
         features = self.scaled_features[individual]
 
-        # 方法1：计算几何多样性 GD = det(F·F^T)
-        # 获取已缩放的特征矩阵
+        dot_p = np.dot(features, features.T)
+        _, diversity = np.linalg.slogdet(dot_p)
 
-        # dot_p = np.dot(features, features.T)
-        # _, diversity = np.linalg.slogdet(dot_p)
-
-        # 方法2：计算最小生成树权重和（覆盖整个子集的最短路径）
-        # 构建距离图
-        graph = kneighbors_graph(features, n_neighbors=min(len(features) - 1, 20),
-                                 mode='distance', include_self=False)
-        # 计算最小生成树
-        mst = minimum_spanning_tree(graph)
-        diversity = mst.sum()
+        # graph = kneighbors_graph(features, n_neighbors=min(len(features) - 1, 20),
+        #                          mode='distance', include_self=False)
+        # mst = minimum_spanning_tree(graph)
+        # diversity = mst.sum()
 
         return diversity
 
@@ -88,8 +82,36 @@ class NSGADATIS:
         # 2. 计算几何多样性（最大化）
         diversity = self._calculate_geometric_diversity(individual)
 
-        # 返回待最大化的目标值
-        return [uncertainty, diversity]
+        # 3. 估计故障类型覆盖率（基于特征聚类）
+        coverage = self._estimate_fault_coverage(individual)
+
+        # 返回三个目标
+        return [uncertainty, diversity, coverage]
+
+    def _evaluate_fault_detection(self, pareto_front, pareto_objectives):
+        """评估每个帕累托解的故障检出可能性"""
+        scores = []
+        alpha = 100
+        for i, solution in enumerate(pareto_front):
+            # 结合原始DATIS的评分方法
+            certainty_score = pareto_objectives[i][0]  # 不确定性
+            diversity_score = pareto_objectives[i][1]  # 多样性
+
+            # 如果有第三个目标（故障覆盖率）
+            if len(pareto_objectives[i]) > 2:
+                coverage_score = pareto_objectives[i][2]  # 已计算的故障覆盖
+            else:
+                # 如果没有第三个目标，临时计算一个
+                coverage_score = self._estimate_fault_coverage(solution)
+
+            # 加权组合评分
+            combined_score = (certainty_score * alpha / self.n_samples +
+                              diversity_score / (self.budget ^ 2) +
+                              coverage_score)
+            scores.append(combined_score)
+
+        best_idx = np.argmax(scores)
+        return best_idx
 
     def _fast_non_dominated_sort(self, population):
         """执行快速非支配排序，返回各个支配前沿"""
@@ -190,26 +212,74 @@ class NSGADATIS:
         return selected
 
     def _crossover(self, parent1, parent2):
-        """执行交叉操作，确保结果不含重复元素"""
+        """使用差异保留交叉策略"""
         if random.random() < self.crossover_rate:
-            # 集合操作确保无重复
-            combined = list(set(parent1).union(set(parent2)))
-            if len(combined) <= self.budget:
-                # 如果合并后元素不足，随机添加
-                available_indices = list(set(range(self.n_samples)) - set(combined))
-                if available_indices:  # 确保有可用索引
-                    additional = random.sample(available_indices,
-                                               min(self.budget - len(combined), len(available_indices)))
-                    combined.extend(additional)
+            # 计算父代之间的差异
+            set1 = set(parent1)
+            set2 = set(parent2)
 
-                # 如果仍然不足budget，用已有元素填充（可能有重复）
-                while len(combined) < self.budget:
-                    combined.append(random.choice(range(self.n_samples)))
-            else:
-                # 如果合并后元素过多，随机选择budget个
-                combined = random.sample(combined, self.budget)
-            return combined
+            # 共有元素和差异元素
+            common = list(set1.intersection(set2))
+            diff1 = list(set1 - set2)
+            diff2 = list(set2 - set1)
+
+            # 优先保留共有元素，然后从差异元素中随机选择
+            child = common.copy()
+
+            # 从差异中选择元素
+            remaining = self.budget - len(child)
+            combined_diff = diff1 + diff2
+
+            if combined_diff and remaining > 0:
+                # 优先选择不确定性较高的元素
+                diff_scores = [self.uncertainty_scores[idx] for idx in combined_diff]
+                sorted_indices = np.argsort(-np.array(diff_scores))
+
+
+                deterministic_count = int(remaining * 0.7)
+                selected_deterministic = [combined_diff[sorted_indices[i]]
+                                          for i in range(min(deterministic_count, len(sorted_indices)))]
+
+                remaining_after_deterministic = remaining - len(selected_deterministic)
+                if remaining_after_deterministic > 0 and len(combined_diff) > len(selected_deterministic):
+                    remaining_pool = [idx for i, idx in enumerate(combined_diff)
+                                      if i not in sorted_indices[:len(selected_deterministic)]]
+                    selected_random = random.sample(remaining_pool,
+                                                    min(remaining_after_deterministic, len(remaining_pool)))
+                else:
+                    selected_random = []
+
+                child.extend(selected_deterministic + selected_random)
+
+            # 如果仍未达到预算，从未使用的样本中随机选择
+            if len(child) < self.budget:
+                unused = list(set(range(self.n_samples)) - set(child))
+                if unused:
+                    additional = random.sample(unused, min(self.budget - len(child), len(unused)))
+                    child.extend(additional)
+
+            # 如果超出预算，随机移除
+            if len(child) > self.budget:
+                child = random.sample(child, self.budget)
+
+            return child
         return parent1.copy()
+
+    def _estimate_fault_coverage(self, individual):
+        """估计可能的故障类型覆盖"""
+        # 根据特征相似性将测试集划分为潜在的故障类型簇
+        if not hasattr(self, 'feature_clusters'):
+            # 预计算特征聚类（模拟不同故障类型），
+            from sklearn.cluster import KMeans
+            n_clusters = min(20, self.n_samples // 100)  # 估计故障类型数量
+            self.kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+            self.feature_clusters = self.kmeans.fit_predict(self.reduced_features)
+
+        # 计算所选样本覆盖的簇数量
+        selected_clusters = set(self.feature_clusters[individual])
+        coverage_ratio = len(selected_clusters) / len(np.unique(self.feature_clusters))
+
+        return coverage_ratio
 
     def _mutation(self, individual):
         """执行变异操作，确保结果不含重复元素"""
@@ -253,6 +323,7 @@ class NSGADATIS:
                 for _ in range(self.pop_size // 2):
                     # 选择两个父代
                     parents = random.sample(population, 2)
+
                     # 交叉
                     child1 = self._crossover(parents[0], parents[1])
                     child2 = self._crossover(parents[1], parents[0])
@@ -322,15 +393,13 @@ class NSGADATIS:
 
             if not final_fronts or not final_fronts[0]:
                 print("警告：未找到任何帕累托最优解，返回随机解")
-                return random.choice(population), [random.choice(population)], [[0, 0]]
+                return random.choice(population), [random.choice(population)], [[0, 0, 0]]
 
             pareto_front = [population[i] for i in final_fronts[0]]
             pareto_objectives = [final_objectives[i] for i in final_fronts[0]]
 
-            # 选择一个平衡的解返回
-            # 这里选择不确定性和多样性乘积最大的解
-            products = [obj[0] * obj[1] for obj in pareto_objectives]
-            best_idx = np.argmax(products) if products else 0
+            # 使用优化的解选择方法
+            best_idx = self._evaluate_fault_detection(pareto_front, pareto_objectives)
 
             # 打印帕累托前沿信息
             print(f"发现{len(pareto_front)}个帕累托最优解")
@@ -339,18 +408,31 @@ class NSGADATIS:
                     f"不确定性范围: [{min(obj[0] for obj in pareto_objectives):.4f}, {max(obj[0] for obj in pareto_objectives):.4f}]")
                 print(
                     f"多样性范围: [{min(obj[1] for obj in pareto_objectives):.4f}, {max(obj[1] for obj in pareto_objectives):.4f}]")
-                print(f"选择的解 - 不确定性: {pareto_objectives[best_idx][0]:.4f}, 多样性: {pareto_objectives[best_idx][1]:.4f}")
+
+                # 如果有第三个目标（故障覆盖率）
+                if len(pareto_objectives[0]) > 2:
+                    print(
+                        f"故障覆盖率范围: [{min(obj[2] for obj in pareto_objectives):.4f}, {max(obj[2] for obj in pareto_objectives):.4f}]")
+
+                print(f"选择的解 - 不确定性: {pareto_objectives[best_idx][0]:.4f}, 多样性: {pareto_objectives[best_idx][1]:.4f}",
+                      end="")
+
+                # 如果有第三个目标
+                if len(pareto_objectives[best_idx]) > 2:
+                    print(f", 故障覆盖率: {pareto_objectives[best_idx][2]:.4f}")
+                else:
+                    print("")
 
             return pareto_front[best_idx], pareto_front, pareto_objectives
 
         except Exception as e:
             print(f"计算最终结果时出错: {str(e)}")
             # 在出错时返回随机解
-            return random.choice(population), [random.choice(population)], [[0, 0]]
+            return random.choice(population), [random.choice(population)], [[0, 0, 0]]  # 更新为三个目标
 
 
 if __name__ == "__main__":
-    # 示例用法
+
     n_samples = 10000
     feature_dim = 256
     test_features = np.random.rand(n_samples, feature_dim)  # 潜在特征
