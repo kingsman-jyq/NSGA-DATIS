@@ -67,29 +67,19 @@ class NSGADATIS:
         dot_p = np.dot(features, features.T)
         _, diversity = np.linalg.slogdet(dot_p)
 
-        # graph = kneighbors_graph(features, n_neighbors=min(len(features) - 1, 20),
-        #                          mode='distance', include_self=False)
-        # mst = minimum_spanning_tree(graph)
-        # diversity = mst.sum()
-
         return diversity
 
     def _calculate_objectives(self, individual):
-        """计算两个目标函数值：不确定性和几何多样性"""
-        # 1. 计算平均不确定性（最大化）
         uncertainty = np.mean(self.uncertainty_scores[individual])
 
-        # 2. 计算几何多样性（最大化）
         diversity = self._calculate_geometric_diversity(individual)
 
-        # 3. 估计故障类型覆盖率（基于特征聚类）
         coverage = self._estimate_fault_coverage(individual)
 
         # 返回三个目标
         return [uncertainty, diversity, coverage]
 
     def _evaluate_fault_detection(self, pareto_front, pareto_objectives):
-        """评估每个帕累托解的故障检出可能性"""
         scores = []
         alpha = 100
         for i, solution in enumerate(pareto_front):
@@ -97,11 +87,9 @@ class NSGADATIS:
             certainty_score = pareto_objectives[i][0]  # 不确定性
             diversity_score = pareto_objectives[i][1]  # 多样性
 
-            # 如果有第三个目标（故障覆盖率）
             if len(pareto_objectives[i]) > 2:
                 coverage_score = pareto_objectives[i][2]  # 已计算的故障覆盖
             else:
-                # 如果没有第三个目标，临时计算一个
                 coverage_score = self._estimate_fault_coverage(solution)
 
             # 加权组合评分
@@ -114,11 +102,10 @@ class NSGADATIS:
         return best_idx
 
     def _fast_non_dominated_sort(self, population):
-        """执行快速非支配排序，返回各个支配前沿"""
         n = len(population)
-        domination_count = [0] * n  # 被支配计数
-        dominated_solutions = [[] for _ in range(n)]  # 支配的解集
-        fronts = [[]]  # 存储各个前沿
+        domination_count = [0] * n
+        dominated_solutions = [[] for _ in range(n)]
+        fronts = [[]]
 
         # 计算每个解的支配关系
         objectives = [self._calculate_objectives(ind) for ind in population]
@@ -131,12 +118,10 @@ class NSGADATIS:
                 # 检查i是否支配j
                 if all(o_i >= o_j for o_i, o_j in zip(objectives[i], objectives[j])) and \
                         any(o_i > o_j for o_i, o_j in zip(objectives[i], objectives[j])):
-                    # i支配j
                     dominated_solutions[i].append(j)
                 # 检查j是否支配i
                 elif all(o_j >= o_i for o_i, o_j in zip(objectives[i], objectives[j])) and \
                         any(o_j > o_i for o_i, o_j in zip(objectives[i], objectives[j])):
-                    # j支配i
                     domination_count[i] += 1
 
             # 如果i不被任何解支配，将其添加到第一前沿
@@ -145,7 +130,7 @@ class NSGADATIS:
 
         # 生成所有前沿
         i = 0
-        while i < len(fronts) and fronts[i]:  # 确保i在有效范围内
+        while i < len(fronts) and fronts[i]:
             next_front = []
             for j in fronts[i]:
                 for k in dominated_solutions[j]:
@@ -190,29 +175,24 @@ class NSGADATIS:
         return distance
 
     def _crowded_comparison_operator(self, i, j, rank, distance):
-        """拥挤比较运算符：先比较等级，再比较拥挤度"""
         if rank[i] < rank[j]:
             return True
         elif rank[i] > rank[j]:
             return False
-        elif distance[i] > distance[j]:  # 相同等级，比较拥挤度
+        elif distance[i] > distance[j]:
             return True
         return False
 
-    def _tournament_selection(self, population, rank, distance, k=2):
-        """基于锦标赛选择的选择操作"""
-        selected = []
-        for _ in range(len(population)):
-            candidates = random.sample(range(len(population)), k)
-            best = candidates[0]
-            for candidate in candidates[1:]:
-                if self._crowded_comparison_operator(candidate, best, rank, distance):
-                    best = candidate
-            selected.append(population[best].copy())
-        return selected
+
+    def _tournament_selection_single(self, population_indices, rank, distance, k=2):
+        candidates = random.sample(population_indices, k)
+        best = candidates[0]
+        for candidate in candidates[1:]:
+            if self._crowded_comparison_operator(candidate, best, rank, distance):
+                best = candidate
+        return best
 
     def _crossover(self, parent1, parent2):
-        """使用差异保留交叉策略"""
         if random.random() < self.crossover_rate:
             # 计算父代之间的差异
             set1 = set(parent1)
@@ -234,7 +214,6 @@ class NSGADATIS:
                 # 优先选择不确定性较高的元素
                 diff_scores = [self.uncertainty_scores[idx] for idx in combined_diff]
                 sorted_indices = np.argsort(-np.array(diff_scores))
-
 
                 deterministic_count = int(remaining * 0.7)
                 selected_deterministic = [combined_diff[sorted_indices[i]]
@@ -266,7 +245,6 @@ class NSGADATIS:
         return parent1.copy()
 
     def _estimate_fault_coverage(self, individual):
-        """估计可能的故障类型覆盖"""
         # 根据特征相似性将测试集划分为潜在的故障类型簇
         if not hasattr(self, 'feature_clusters'):
             # 预计算特征聚类（模拟不同故障类型），
@@ -282,9 +260,7 @@ class NSGADATIS:
         return coverage_ratio
 
     def _mutation(self, individual):
-        """执行变异操作，确保结果不含重复元素"""
         individual = individual.copy()
-        # 转为集合便于检查
         individual_set = set(individual)
 
         for i in range(len(individual)):
@@ -295,7 +271,7 @@ class NSGADATIS:
 
                 # 生成一个不在individual_set中的随机索引
                 tries = 0
-                while tries < 10:  # 限制尝试次数
+                while tries < 10:
                     new_index = random.randint(0, self.n_samples - 1)
                     if new_index not in individual_set:
                         individual[i] = new_index
@@ -311,33 +287,14 @@ class NSGADATIS:
         return individual
 
     def run(self):
-        """运行NSGA-II算法"""
-        # 初始化种群
         population = self._initialize_population()
 
         # 主循环
         with tqdm(total=self.generations, desc="NSGA-II Optimization") as pbar:
-            for _ in range(self.generations):
-                # 生成子代
-                offspring = []
-                for _ in range(self.pop_size // 2):
-                    # 选择两个父代
-                    parents = random.sample(population, 2)
-
-                    # 交叉
-                    child1 = self._crossover(parents[0], parents[1])
-                    child2 = self._crossover(parents[1], parents[0])
-                    # 变异
-                    child1 = self._mutation(child1)
-                    child2 = self._mutation(child2)
-                    offspring.extend([child1, child2])
-
-                # 合并父代和子代
-                combined = population + offspring
-
+            for generation in range(self.generations):
+                # 计算当前种群的Pareto前沿和拥挤度
                 try:
-                    # 非支配排序
-                    fronts, objectives = self._fast_non_dominated_sort(combined)
+                    fronts, objectives = self._fast_non_dominated_sort(population)
 
                     # 计算每个前沿的拥挤度
                     crowding_distances = {}
@@ -351,29 +308,65 @@ class NSGADATIS:
                         for j in front:
                             ranks[j] = i
 
-                    # 选择下一代种群
+                    # 生成子代
+                    offspring = []
+                    population_indices = list(range(len(population)))
+
+                    for _ in range(self.pop_size // 2):
+                        # 使用锦标赛选择两个父代
+                        parent1_idx = self._tournament_selection_single(
+                            population_indices, ranks, crowding_distances, k=2)
+                        parent2_idx = self._tournament_selection_single(
+                            population_indices, ranks, crowding_distances, k=2)
+
+                        parent1 = population[parent1_idx]
+                        parent2 = population[parent2_idx]
+
+                        # 交叉
+                        child1 = self._crossover(parent1, parent2)
+                        child2 = self._crossover(parent2, parent1)
+
+                        # 变异
+                        child1 = self._mutation(child1)
+                        child2 = self._mutation(child2)
+
+                        offspring.extend([child1, child2])
+
+                    # 合并父代和子代
+                    combined = population + offspring
+
+                    combined_fronts, combined_objectives = self._fast_non_dominated_sort(combined)
+
+                    combined_crowding_distances = {}
+                    for front in combined_fronts:
+                        distances = self._calculate_crowding_distance(front, combined_objectives)
+                        combined_crowding_distances.update(distances)
+
+                    combined_ranks = {}
+                    for i, front in enumerate(combined_fronts):
+                        for j in front:
+                            combined_ranks[j] = i
+
                     new_population = []
                     front_idx = 0
-                    while len(new_population) + len(fronts[front_idx]) <= self.pop_size and front_idx < len(fronts):
+                    while (len(new_population) + len(combined_fronts[front_idx]) <= self.pop_size
+                           and front_idx < len(combined_fronts)):
                         # 完全添加当前前沿
-                        for i in fronts[front_idx]:
+                        for i in combined_fronts[front_idx]:
                             new_population.append(combined[i])
                         front_idx += 1
 
-                    # 如果还需要更多个体，根据拥挤度选择最后一个前沿的部分个体
-                    if len(new_population) < self.pop_size and front_idx < len(fronts):
-                        last_front = fronts[front_idx]
+                    if len(new_population) < self.pop_size and front_idx < len(combined_fronts):
+                        last_front = combined_fronts[front_idx]
                         # 按拥挤度排序
                         sorted_last_front = sorted(last_front,
-                                                   key=lambda i: crowding_distances.get(i, 0),
+                                                   key=lambda i: combined_crowding_distances.get(i, 0),
                                                    reverse=True)
 
-                        # 添加所需数量的个体
                         remaining = self.pop_size - len(new_population)
                         for i in range(min(remaining, len(sorted_last_front))):
                             new_population.append(combined[sorted_last_front[i]])
 
-                    # 如果仍然不足，随机添加（这是一个安全措施）
                     while len(new_population) < self.pop_size:
                         random_idx = random.randint(0, len(combined) - 1)
                         new_population.append(combined[random_idx])
@@ -382,8 +375,7 @@ class NSGADATIS:
                     population = [ind.copy() for ind in new_population]
 
                 except Exception as e:
-                    print(f"迭代中发生错误: {str(e)}")
-                    # 在出错时，保持当前种群不变，继续下一次迭代
+                    print(f"第{generation + 1}代迭代中发生错误: {str(e)}")
 
                 pbar.update(1)
 
@@ -432,7 +424,6 @@ class NSGADATIS:
 
 
 if __name__ == "__main__":
-
     n_samples = 10000
     feature_dim = 256
     test_features = np.random.rand(n_samples, feature_dim)  # 潜在特征
